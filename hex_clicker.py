@@ -60,20 +60,75 @@ class Hex:
         else:
             pygame.draw.polygon(surface, self.color, outer_vertices)
             pygame.draw.polygon(surface, (0, 0, 0), outer_vertices, width=1)
+    
+    def contains_point(self, point):
+        """Check if the point is inside the hexagon."""
+        # Use the vertices and pygame's collision detection
+        vertices = self.get_vertices(self.size)
+        return pygame.Rect(
+            self.center_x - self.size, 
+            self.center_y - self.size,
+            self.size * 2, 
+            self.size * 2
+        ).collidepoint(point) and point_in_polygon(point, vertices)
+    
+    def randomize_color(self):
+        """Randomize the color of this hex."""
+        self.color = (
+            random.randint(100, 255),
+            random.randint(100, 255),
+            random.randint(100, 255)
+        )
+
+# ─── UTILITY FUNCTIONS ─────────────────────────────────────────────────────────
+def point_in_polygon(point, vertices):
+    """Check if a point is inside a polygon using ray casting algorithm."""
+    x, y = point
+    n = len(vertices)
+    inside = False
+    
+    p1x, p1y = vertices[0]
+    for i in range(1, n + 1):
+        p2x, p2y = vertices[i % n]
+        if y > min(p1y, p2y):
+            if y <= max(p1y, p2y):
+                if x <= max(p1x, p2x):
+                    if p1y != p2y:
+                        xinters = (y - p1y) * (p2x - p1x) / (p2y - p1y) + p1x
+                    if p1x == p2x or x <= xinters:
+                        inside = not inside
+        p1x, p1y = p2x, p2y
+    
+    return inside
 
 # ─── GRID BUILDER ────────────────────────────────────────────────────────────
-def create_hex_grid(cols, rows, size, border, orientation):
-    """Create a grid of hexagons using simple offset coordinates."""
+def create_hex_grid(cols, rows, size, border, orientation, existing_hexes=None):
+    """Create a grid of hexagons using simple offset coordinates.
+    
+    If existing_hexes is provided, it will try to preserve the colors of hexes
+    that already exist at the same positions.
+    """
     grid = []
+    
+    # Create a lookup of existing hex colors by position (col, row)
+    existing_colors = {}
+    if existing_hexes:
+        for hex in existing_hexes:
+            existing_colors[(hex.col, hex.row)] = hex.color
     
     for col in range(cols):
         for row in range(rows):
-            # Random color
-            color = (
-                random.randint(100, 255),
-                random.randint(100, 255),
-                random.randint(100, 255)
-            )
+            # Check if this position already had a hex
+            if (col, row) in existing_colors:
+                # Preserve the color from the existing hex
+                color = existing_colors[(col, row)]
+            else:
+                # Only new hexes get random colors
+                color = (
+                    random.randint(100, 255),
+                    random.randint(100, 255),
+                    random.randint(100, 255)
+                )
             
             # Create hex
             hex = Hex(col, row, size, color, border, orientation)
@@ -93,6 +148,11 @@ class HexMVP:
         self.radius = DEFAULT_RADIUS
         self.border = DEFAULT_BORDER
         self.orientation = DEFAULT_ORIENTATION
+        
+        # For handling hex interaction
+        self.selected_hex = None
+        self.color_picker_active = False
+        self.color_picker_hex = None
 
         self._recalc_window_size()
         self.window = pygame.display.set_mode(
@@ -148,6 +208,8 @@ class HexMVP:
         )
         
         self.clock = pygame.time.Clock()
+        
+        # Initial grid creation - this is the only time we do full random colors
         self.hexes = create_hex_grid(
             self.cols, self.rows, self.radius, self.border, self.orientation
         )
@@ -168,6 +230,53 @@ class HexMVP:
         self.win_h = int(height + margin)
         self.win_h = max(self.win_h, 300)  # Minimum height
 
+    def find_hex_at_position(self, pos):
+        """Find the hex at the given screen position."""
+        for hex in self.hexes:
+            if hex.contains_point(pos):
+                return hex
+        return None
+    
+    def handle_hex_click(self, pos, right_click=False):
+        """Handle mouse click on a hex."""
+        # If color picker is active, don't process clicks on hexes
+        if self.color_picker_active:
+            return
+            
+        hex = self.find_hex_at_position(pos)
+        if hex:
+            if right_click:
+                # Right click - open color picker
+                self.open_color_picker(hex)
+            else:
+                # Left click - randomize color
+                hex.randomize_color()
+            
+            # Set as selected hex
+            self.selected_hex = hex
+    
+    def open_color_picker(self, hex):
+        """Open a color picker for the given hex."""
+        if self.color_picker_active:
+            return  # Prevent opening multiple color pickers
+        
+        # Store the hex and mark picker as active
+        self.color_picker_hex = hex
+        self.color_picker_active = True
+        
+        # Create color picker dialog - convert the tuple to pygame.Color
+        rect = pygame.Rect(0, 0, 400, 400)  # Increased size to avoid warning
+        rect.center = (self.win_w // 2, self.win_h // 2)
+        
+        # Convert RGB tuple to pygame.Color object
+        color_obj = pygame.Color(hex.color[0], hex.color[1], hex.color[2])
+        
+        self.color_picker = pygame_gui.windows.UIColourPickerDialog(
+            rect=rect,
+            manager=self.ui_mgr,
+            initial_colour=color_obj
+        )
+
     def run(self):
         while True:
             dt = self.clock.tick(60)/1000.0
@@ -181,6 +290,15 @@ class HexMVP:
                         (ev.w, ev.h), pygame.RESIZABLE
                     )
                     self.ui_mgr.set_window_resolution((ev.w, ev.h))
+                
+                # Handle mouse clicks for hex interaction
+                if ev.type == pygame.MOUSEBUTTONDOWN:
+                    # Process mouse clicks only if no color picker is active
+                    if not self.color_picker_active:
+                        if ev.button == 1:  # Left click
+                            self.handle_hex_click(ev.pos)
+                        elif ev.button == 3:  # Right click
+                            self.handle_hex_click(ev.pos, right_click=True)
 
                 # UI event processing
                 self.ui_mgr.process_events(ev)
@@ -191,10 +309,12 @@ class HexMVP:
                         if ev.ui_element == slider:
                             setattr(self, key, int(ev.value))
                             # rebuild grid and window on any param change
+                            # but preserve existing hex colors
                             self._recalc_window_size()
                             self.hexes = create_hex_grid(
                                 self.cols, self.rows, self.radius, 
-                                self.border, self.orientation
+                                self.border, self.orientation,
+                                existing_hexes=self.hexes  # Pass existing hexes to preserve colors
                             )
                             break
                 
@@ -203,11 +323,28 @@ class HexMVP:
                     if ev.ui_element == self.orientation_dropdown:
                         self.orientation = ev.text
                         # rebuild grid with new orientation
+                        # but preserve existing hex colors
                         self._recalc_window_size()
                         self.hexes = create_hex_grid(
                             self.cols, self.rows, self.radius,
-                            self.border, self.orientation
+                            self.border, self.orientation,
+                            existing_hexes=self.hexes  # Pass existing hexes to preserve colors
                         )
+                
+                # Handle color picker confirmation
+                if ev.type == pygame_gui.UI_COLOUR_PICKER_COLOUR_PICKED and self.color_picker_active:
+                    if self.color_picker_hex:
+                        # Convert the pygame_gui color to RGB tuple
+                        r, g, b = ev.colour.r, ev.colour.g, ev.colour.b
+                        self.color_picker_hex.color = (r, g, b)
+                    self.color_picker_active = False
+                    self.color_picker_hex = None
+                
+                # Handle color picker closed/cancelled
+                if ev.type == pygame_gui.UI_WINDOW_CLOSE:
+                    if self.color_picker_active and hasattr(self, 'color_picker') and ev.ui_element == self.color_picker:
+                        self.color_picker_active = False
+                        self.color_picker_hex = None
 
             self.ui_mgr.update(dt)
             self._draw()
@@ -218,6 +355,13 @@ class HexMVP:
         # Draw all hexes
         for hex in self.hexes:
             hex.draw(self.window)
+            
+            # Highlight selected hex
+            if hex == self.selected_hex:
+                # Draw a highlight around the selected hex
+                highlight_vertices = hex.get_vertices(hex.size + 2)
+                pygame.draw.polygon(self.window, (255, 255, 255), highlight_vertices, width=2)
+        
         # Draw UI over top
         self.ui_mgr.draw_ui(self.window)
 
